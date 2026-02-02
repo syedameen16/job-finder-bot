@@ -1,8 +1,9 @@
 import os
 
 # Get secrets from environment
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID')
 
 # Your exact criteria from job alerts
 JOB_CRITERIA = {
