@@ -12,8 +12,8 @@ from telegram import Bot
 
 # ========== CONFIG ==========
 HISTORY_FILE = "tracked_jobs.json"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
 # ========== YOUR DAILY JOB PORTALS ==========
 DAILY_PORTALS = [
@@ -125,7 +125,7 @@ Good luck! 🚀
     
     try:
         bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
+            chat_id=CHAT_ID,
             text=message,
             parse_mode='Markdown',
             disable_web_page_preview=True
@@ -141,7 +141,7 @@ def main():
     print("🎯 DAILY JOB PORTAL TRACKER")
     print("=" * 60)
     
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not BOT_TOKEN or not CHAT_ID:
         print("❌ Set Telegram credentials")
         return
     
@@ -161,7 +161,7 @@ def main():
             history[portal_id] = today  # Mark as sent today
     
     # Send summary
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = Bot(token=BOT_TOKEN)
     
     if new_portals:
         success = send_daily_summary(bot, len(new_portals))
@@ -182,3 +182,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
