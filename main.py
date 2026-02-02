@@ -7,22 +7,20 @@ from telegram import Bot
 from telegram.error import TelegramError
 import asyncio
 import hashlib
+import re
 
-# Import config
-try:
-    from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, LOCATIONS
-    from resume_keywords import RESUME_KEYWORDS
-except ImportError:
-    # For local testing
-    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-    LOCATIONS = ['Bangalore', 'Bengaluru', 'Hyderabad', 'Pune', 'Chennai', 'Remote', 'India']
+from config import JOB_CRITERIA, TARGET_COMPANIES, NOTIFICATION_EMAIL
+from resume_keywords import (
+    RESUME_KEYWORDS, PREFERRED_LOCATIONS, PREFERRED_INDUSTRIES,
+    generate_search_queries, generate_naukri_params
+)
 
-class GitHubJobAlert:
+class EnhancedJobAlert:
     def __init__(self):
-        self.bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
+        self.bot = Bot(token=os.environ.get('TELEGRAM_BOT_TOKEN')) if os.environ.get('TELEGRAM_BOT_TOKEN') else None
         self.history_file = 'jobs_history.json'
         self.seen_jobs = self.load_history()
+        self.email = NOTIFICATION_EMAIL
         
     def load_history(self):
         """Load previously seen jobs"""
@@ -42,218 +40,304 @@ class GitHubJobAlert:
         job_str = f"{job.get('title', '')}{job.get('company', '')}{job.get('platform', '')}"
         return hashlib.md5(job_str.encode()).hexdigest()
     
-    def check_location(self, location):
-        """Check if location matches our criteria"""
-        if not location:
-            return False
-        location_lower = location.lower()
-        return any(loc.lower() in location_lower for loc in LOCATIONS)
+    def check_criteria_match(self, job):
+        """Check if job matches all your criteria"""
+        title = job.get('title', '').lower()
+        description = job.get('description', '').lower()
+        company = job.get('company', '').lower()
+        location = job.get('location', '').lower()
+        
+        # 1. Check for target companies (priority)
+        for target_company in TARGET_COMPANIES:
+            if target_company.lower() in company:
+                return True, "Target Company"
+        
+        # 2. Check location
+        location_match = False
+        for loc in PREFERRED_LOCATIONS:
+            if loc.lower() in location:
+                location_match = True
+                break
+        
+        if not location_match:
+            return False, "Location mismatch"
+        
+        # 3. Check for experience level (0 years/fresher)
+        exp_keywords = ['fresher', 'entry level', 'junior', '0 year', '0-1 year', 'intern']
+        exp_match = any(exp in title.lower() or exp in description.lower() for exp in exp_keywords)
+        
+        if not exp_match:
+            # Check for senior roles to exclude
+            senior_keywords = ['senior', 'lead', 'manager', '2+', '3+', '4+', '5+']
+            if any(senior in title.lower() for senior in senior_keywords):
+                return False, "Senior role"
+        
+        # 4. Check primary keywords
+        primary_match_count = 0
+        for keyword in RESUME_KEYWORDS['primary']:
+            if keyword.lower() in title.lower() or keyword.lower() in description.lower():
+                primary_match_count += 1
+        
+        # 5. Check secondary keywords
+        secondary_match_count = 0
+        for keyword in RESUME_KEYWORDS['secondary']:
+            if keyword.lower() in description.lower():
+                secondary_match_count += 1
+        
+        # Decision logic
+        if primary_match_count >= 2:
+            return True, f"Primary keywords: {primary_match_count}"
+        elif primary_match_count >= 1 and secondary_match_count >= 2:
+            return True, f"Mixed keywords: {primary_match_count}+{secondary_match_count}"
+        else:
+            return False, f"Insufficient keyword match: {primary_match_count} primary, {secondary_match_count} secondary"
     
-    def search_github_jobs(self):
-        """Search GitHub Jobs API"""
+    def search_naukri_enhanced(self):
+        """Enhanced Naukri search with your criteria"""
         jobs = []
         try:
-            url = "https://jobs.github.com/positions.json"
-            params = {
-                'description': 'data analyst',
-                'location': 'india'
-            }
+            base_params = generate_naukri_params()
+            queries = ['data analyst', 'python analyst', 'sql analyst', 'power bi developer']
             
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                for job in data:
-                    if self.check_location(job.get('location', '')):
-                        jobs.append({
-                            'title': job.get('title', ''),
-                            'company': job.get('company', ''),
-                            'location': job.get('location', ''),
-                            'link': job.get('url', ''),
-                            'platform': 'GitHub Jobs',
-                            'type': job.get('type', ''),
-                            'description': job.get('description', '')[:200] + '...'
-                        })
-        except Exception as e:
-            print(f"Error searching GitHub Jobs: {e}")
-        return jobs
-    
-    def search_naukri_simple(self):
-        """Simple Naukri search"""
-        jobs = []
-        try:
-            # Note: Naukri has anti-scraping. This is a simplified version.
-            # For production, consider using their API with proper authentication.
-            search_queries = [
-                'data+analyst+bangalore',
-                'power+bi+developer+hyderabad',
-                'sql+analyst+pune',
-                'python+data+analyst+chennai'
-            ]
-            
-            for query in search_queries:
-                url = f"https://www.naukri.com/{query}-jobs"
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
+            for query in queries:
+                params = base_params.copy()
+                params['keyword'] = query
                 
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
+                # Search for each location
+                for location in ['bangalore', 'chennai', 'hyderabad', 'pune', 'mumbai']:
+                    params['location'] = location
                     
-                    # Note: Naukri's HTML structure changes frequently
-                    # This is a basic example
-                    job_cards = soup.find_all('article', class_='jobTuple')
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'appid': '109',
+                        'systemid': '109'
+                    }
                     
-                    for card in job_cards[:5]:  # Limit to 5 per query
-                        try:
-                            title_elem = card.find('a', class_='title')
-                            company_elem = card.find('a', class_='subTitle')
-                            location_elem = card.find('li', class_='location')
+                    response = requests.get(
+                        'https://www.naukri.com/jobapi/v3/search',
+                        params=params,
+                        headers=headers,
+                        timeout=15
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        job_details = data.get('jobDetails', [])
+                        
+                        for job_data in job_details:
+                            # Check salary
+                            salary = job_data.get('salary', '')
+                            min_salary = self.extract_salary_min(salary)
                             
-                            if title_elem:
-                                job = {
-                                    'title': title_elem.text.strip(),
-                                    'company': company_elem.text.strip() if company_elem else 'Not specified',
-                                    'location': location_elem.text.strip() if location_elem else 'India',
-                                    'link': title_elem.get('href', ''),
-                                    'platform': 'Naukri',
-                                    'description': 'Data analyst position'
-                                }
-                                
-                                if self.check_location(job['location']):
-                                    jobs.append(job)
-                        except:
-                            continue
-                
-                # Be polite - delay between requests
-                import time
-                time.sleep(2)
-                
+                            if min_salary and min_salary < 400000:
+                                continue  # Skip if less than 4 LPA
+                            
+                            # Check experience
+                            experience = job_data.get('experience', '')
+                            if '1' in experience or '2' in experience or '3' in experience:
+                                continue  # Skip if requires 1+ years
+                            
+                            job = {
+                                'title': job_data.get('title', ''),
+                                'company': job_data.get('companyName', ''),
+                                'location': job_data.get('placeholders', [{}])[1].get('label', ''),
+                                'link': job_data.get('jdURL', ''),
+                                'platform': 'Naukri',
+                                'salary': salary,
+                                'experience': experience,
+                                'description': job_data.get('jobDescription', '')[:300] + '...',
+                                'posted_date': job_data.get('createdDate', '')
+                            }
+                            
+                            jobs.append(job)
+                    
+                    # Delay to avoid rate limiting
+                    await asyncio.sleep(2)
+                    
         except Exception as e:
             print(f"Error searching Naukri: {e}")
         
         return jobs
     
-    def search_linkedin_simple(self):
-        """Simple LinkedIn search using public endpoint"""
+    def extract_salary_min(self, salary_text):
+        """Extract minimum salary from text"""
+        if not salary_text:
+            return None
+        
+        # Patterns like "4-6 LPA", "4 LPA", "₹4,00,000 - ₹6,00,000"
+        patterns = [
+            r'(\d+)\s*-\s*\d+\s*LPA',  # 4-6 LPA
+            r'(\d+)\s*LPA',  # 4 LPA
+            r'₹\s*([\d,]+)\s*-\s*₹',  # ₹4,00,000 - ₹6,00,000
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, salary_text, re.IGNORECASE)
+            if match:
+                try:
+                    salary = match.group(1).replace(',', '')
+                    return int(salary)
+                except:
+                    continue
+        
+        return None
+    
+    def search_linkedin_with_filters(self):
+        """LinkedIn search with your filters"""
         jobs = []
         try:
-            # Using LinkedIn's public job search (simplified)
-            queries = [
-                'data-analyst-jobs-bangalore',
-                'power-bi-developer-jobs-hyderabad',
-                'sql-analyst-jobs-pune',
-                'python-data-analyst-jobs-chennai'
-            ]
+            queries = generate_search_queries()
             
-            for query in queries:
-                url = f"https://www.linkedin.com/jobs/search/?keywords={query}"
+            for query in queries[:10]:  # Limit to first 10 queries
+                url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+                params = {
+                    'keywords': query,
+                    'location': 'India',
+                    'f_E': '1,2',  # Entry level and internship
+                    'f_WT': '2',  # Remote
+                    'start': 0
+                }
+                
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
                 
-                response = requests.get(url, headers=headers, timeout=10)
+                response = requests.get(url, params=params, headers=headers, timeout=15)
+                
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
+                    job_cards = soup.find_all('div', class_='base-card')
                     
-                    # Extract job data from script tag (LinkedIn stores data in JSON-LD)
-                    script_tags = soup.find_all('script', type='application/ld+json')
-                    
-                    for script in script_tags:
+                    for card in job_cards:
                         try:
-                            data = json.loads(script.string)
-                            if isinstance(data, list):
-                                for item in data:
-                                    if item.get('@type') == 'JobPosting':
-                                        job = {
-                                            'title': item.get('title', ''),
-                                            'company': item.get('hiringOrganization', {}).get('name', ''),
-                                            'location': item.get('jobLocation', {}).get('address', {}).get('addressLocality', 'India'),
-                                            'link': item.get('url', ''),
-                                            'platform': 'LinkedIn',
-                                            'description': item.get('description', '')[:200] + '...'
-                                        }
+                            title_elem = card.find('h3', class_='base-search-card__title')
+                            company_elem = card.find('h4', class_='base-search-card__subtitle')
+                            location_elem = card.find('span', class_='job-search-card__location')
+                            link_elem = card.find('a', class_='base-card__full-link')
+                            
+                            if all([title_elem, company_elem, link_elem]):
+                                job = {
+                                    'title': title_elem.text.strip(),
+                                    'company': company_elem.text.strip(),
+                                    'location': location_elem.text.strip() if location_elem else 'India',
+                                    'link': link_elem.get('href'),
+                                    'platform': 'LinkedIn',
+                                    'description': 'LinkedIn job posting'
+                                }
+                                
+                                # Check if it's from target company
+                                company_lower = job['company'].lower()
+                                if any(target.lower() in company_lower for target in TARGET_COMPANIES):
+                                    jobs.append(job)
+                                else:
+                                    # Check other criteria
+                                    matches, reason = self.check_criteria_match(job)
+                                    if matches:
+                                        jobs.append(job)
                                         
-                                        if self.check_location(job['location']):
-                                            jobs.append(job)
-                        except:
+                        except Exception as e:
                             continue
                 
-                import time
-                time.sleep(3)  # Longer delay for LinkedIn
+                # Respectful delay
+                await asyncio.sleep(3)
                 
         except Exception as e:
             print(f"Error searching LinkedIn: {e}")
         
         return jobs
     
-    def check_keywords_match(self, job_title, job_description):
-        """Check if job matches your resume keywords"""
-        text = f"{job_title} {job_description}".lower()
+    def format_enhanced_message(self, job, match_reason=""):
+        """Format job alert with more details"""
+        emoji_map = {
+            'LinkedIn': '💼',
+            'Naukri': '📊',
+            'Indeed': '🔍',
+            'GitHub Jobs': '🐙'
+        }
         
-        # Your specific keywords from resume
-        your_keywords = [
-            'python', 'sql', 'power bi', 'excel', 'pandas', 
-            'data analysis', 'dashboard', 'visualization',
-            'mysql', 'jupyter', 'analytics', 'etl'
-        ]
+        platform_emoji = emoji_map.get(job['platform'], '📨')
         
-        match_count = sum(1 for keyword in your_keywords if keyword in text)
-        return match_count >= 3
+        message = f"""
+{platform_emoji} *NEW JOB ALERT!*
+
+*Position:* {job['title']}
+*Company:* {job['company']}
+*Location:* {job['location']}
+*Platform:* {job['platform']}
+
+"""
+        
+        # Add salary if available
+        if job.get('salary'):
+            message += f"*Salary:* {job['salary']}\n"
+        
+        # Add experience if available
+        if job.get('experience'):
+            message += f"*Experience:* {job['experience']}\n"
+        
+        # Add match reason
+        if match_reason:
+            message += f"*Match:* {match_reason}\n"
+        
+        message += f"""
+[🔗 Apply Here]({job['link']})
+
+⏰ *Posted:* {datetime.now().strftime('%Y-%m-%d %H:%M IST')}
+📧 *Your email:* {self.email}
+"""
+        
+        return message.strip()
     
-    def format_message(self, job):
-        """Format job alert for Telegram"""
-        return f"""
-🚀 **New Job Alert!**
-
-**Position:** {job['title']}
-**Company:** {job['company']}
-**Location:** {job['location']}
-**Platform:** {job['platform']}
-
-[Apply Here]({job['link']})
-
-⏰ Found at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """.strip()
-    
-    async def send_telegram_alert(self, job):
-        """Send alert to Telegram"""
+    async def send_enhanced_alert(self, job, match_reason=""):
+        """Send enhanced alert to Telegram"""
         if not self.bot:
             print("Telegram bot not configured")
             return False
             
         try:
-            message = self.format_message(job)
+            message = self.format_enhanced_message(job, match_reason)
+            
+            # Send with better formatting
             await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
+                chat_id=os.environ.get('TELEGRAM_CHAT_ID'),
                 text=message,
                 parse_mode='Markdown',
-                disable_web_page_preview=False
+                disable_web_page_preview=False,
+                disable_notification=False
             )
-            print(f"✓ Alert sent: {job['title']}")
+            
+            print(f"✅ Alert sent: {job['title']} at {job['company']}")
             return True
+            
         except TelegramError as e:
-            print(f"✗ Telegram error: {e}")
+            print(f"❌ Telegram error: {e}")
             return False
     
-    async def run_search(self):
-        """Main search function"""
-        print("🔍 Starting job search...")
-        print(f"📍 Locations: {', '.join(LOCATIONS)}")
+    async def run_enhanced_search(self):
+        """Main search function with your criteria"""
+        print("=" * 60)
+        print("🔍 ENHANCED JOB ALERT BOT - SYED AMEEN AHMED")
+        print("=" * 60)
+        print(f"📧 Notification email: {self.email}")
+        print(f"📍 Locations: {', '.join(PREFERRED_LOCATIONS)}")
+        print(f"🏢 Target companies: {len(TARGET_COMPANIES)} companies")
+        print(f"💼 Experience: 0 years (Fresher)")
+        print(f"💰 Expected salary: 4 LPA+")
+        print("=" * 60)
         
         all_jobs = []
         
-        # Search different platforms
-        print("Searching GitHub Jobs...")
-        all_jobs.extend(self.search_github_jobs())
+        print("\n1. Searching Naukri with your criteria...")
+        naukri_jobs = await self.search_naukri_enhanced()
+        print(f"   Found {len(naukri_jobs)} jobs on Naukri")
+        all_jobs.extend(naukri_jobs)
         
-        print("Searching Naukri...")
-        all_jobs.extend(self.search_naukri_simple())
+        print("\n2. Searching LinkedIn with filters...")
+        linkedin_jobs = await self.search_linkedin_with_filters()
+        print(f"   Found {len(linkedin_jobs)} jobs on LinkedIn")
+        all_jobs.extend(linkedin_jobs)
         
-        print("Searching LinkedIn...")
-        all_jobs.extend(self.search_linkedin_simple())
-        
-        print(f"\n📊 Found {len(all_jobs)} total jobs")
+        print(f"\n📊 Total jobs found: {len(all_jobs)}")
         
         # Filter and send alerts
         new_jobs = []
@@ -264,40 +348,59 @@ class GitHubJobAlert:
             if job_id in self.seen_jobs:
                 continue
             
-            # Check if job matches keywords
-            if self.check_keywords_match(job['title'], job.get('description', '')):
+            # Check criteria match
+            matches, reason = self.check_criteria_match(job)
+            
+            if matches:
                 # Send alert
-                success = await self.send_telegram_alert(job)
+                success = await self.send_enhanced_alert(job, reason)
                 if success:
                     self.seen_jobs.add(job_id)
                     new_jobs.append(job)
-                    print(f"  → New: {job['title']} at {job['company']}")
+                    print(f"   ✅ New match: {job['title'][:40]}... ({reason})")
             
             # Small delay between sends
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
         
         # Save history
         self.save_history()
         
-        print(f"\n✅ Search complete: {len(new_jobs)} new alerts sent")
-        return new_jobs
+        print("\n" + "=" * 60)
+        print(f"🎯 SEARCH COMPLETE")
+        print(f"   New alerts sent: {len(new_jobs)}")
+        print(f"   Total jobs in history: {len(self.seen_jobs)}")
+        print("=" * 60)
+        
+        # Return summary for GitHub Actions
+        return {
+            'total_found': len(all_jobs),
+            'new_alerts': len(new_jobs),
+            'jobs': new_jobs[:5]  # First 5 new jobs
+        }
 
 async def main():
-    """Main function for GitHub Actions"""
-    alert_bot = GitHubJobAlert()
+    """Main function"""
+    # Check for credentials
+    if not os.environ.get('TELEGRAM_BOT_TOKEN'):
+        print("⚠️ WARNING: TELEGRAM_BOT_TOKEN not set")
+        print("Set it in GitHub Secrets or environment variables")
     
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Warning: Telegram credentials not set")
-        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables")
-        print("Jobs will be found but not sent to Telegram")
+    if not os.environ.get('TELEGRAM_CHAT_ID'):
+        print("⚠️ WARNING: TELEGRAM_CHAT_ID not set")
     
-    new_jobs = await alert_bot.run_search()
+    # Initialize bot
+    alert_bot = EnhancedJobAlert()
     
-    # For GitHub Actions output
-    if new_jobs:
-        print(f"::set-output name=new_jobs::{len(new_jobs)}")
-    else:
-        print("::set-output name=new_jobs::0")
+    # Run search
+    results = await alert_bot.run_enhanced_search()
+    
+    # Output for GitHub Actions
+    print(f"::set-output name=new_jobs::{results['new_alerts']}")
+    print(f"::set-output name=total_found::{results['total_found']}")
+    
+    # Save results to file for GitHub Pages if needed
+    with open('search_results.json', 'w') as f:
+        json.dump(results, f, indent=2)
 
 if __name__ == "__main__":
     asyncio.run(main())
