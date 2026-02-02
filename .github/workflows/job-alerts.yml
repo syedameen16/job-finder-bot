@@ -1,32 +1,39 @@
-name: Job Alert Bot
+name: Enhanced Job Alert Bot
 
 on:
   schedule:
-    # Runs at 9 AM, 12 PM, 3 PM, 6 PM IST every day
-    - cron: '0 3,6,9,12 * * *'  # UTC time (3:30 AM, 6:30 AM, 9:30 AM, 12:30 PM UTC = 9 AM, 12 PM, 3 PM, 6 PM IST)
-  workflow_dispatch:  # Allows manual trigger
+    # Runs at strategic times for job postings (IST)
+    - cron: '0 4 * * *'  # 9:30 AM IST
+    - cron: '0 7 * * *'  # 12:30 PM IST
+    - cron: '0 10 * * *' # 3:30 PM IST
+    - cron: '0 13 * * *' # 6:30 PM IST
+  workflow_dispatch:
   push:
     branches: [ main ]
 
 jobs:
   search-jobs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
-      
+      with:
+        fetch-depth: 0
+    
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.10'
         
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Run Job Alert Bot
+    - name: Run Enhanced Job Alert Bot
+      id: job-bot
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -34,12 +41,26 @@ jobs:
         cd job-alert-bot
         python main.py
         
-    - name: Commit job history
+    - name: Save search results
+      if: always()
+      run: |
+        cd job-alert-bot
+        echo "Search completed at $(date)" >> search_log.txt
+        echo "New jobs: ${{ steps.job-bot.outputs.new_jobs }}" >> search_log.txt
+        
+    - name: Commit updates
       if: always()
       run: |
         cd job-alert-bot
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git config --global user.name "GitHub Actions"
-        git add jobs_history.json
-        git commit -m "Update job history [skip ci]" || echo "No changes to commit"
+        git add jobs_history.json search_results.json search_log.txt
+        git diff --quiet && git diff --staged --quiet || git commit -m "Update job history [skip ci]"
         git push
+        
+    - name: Upload results as artifact
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: job-search-results
+        path: job-alert-bot/search_results.json
