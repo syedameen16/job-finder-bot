@@ -1,19 +1,38 @@
-# .github/workflows/jobs.yml
-name: Job Alerts
+name: Daily Job Checklist
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # Once daily at 9:30 AM IST
+    # Every weekday at 9:30 AM IST
+    - cron: '30 4 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  alerts:
+  send-checklist:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-      - run: pip install feedparser python-telegram-bot
-      - run: python rss_job_bot.py
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+    - name: Install
+      run: pip install python-telegram-bot
+      
+    - name: Send Daily Checklist
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python main.py
+      
+    - name: Update History
+      run: |
+        git config user.email "actions@github.com"
+        git config user.name "GitHub Actions"
+        git add tracked_jobs.json
+        git commit -m "Update job tracker [skip ci]" || echo "No changes"
+        git push
